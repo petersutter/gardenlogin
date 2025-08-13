@@ -1,0 +1,15 @@
+name: Prepare Hotfix Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The tag for which the hotfix should be created'
+        required: true
+        type: string
+
+jobs:
+  call-dashboard-workflow:
+    uses: petersutter/dashboard/.github/workflows/prepare-hotfix-branch.yaml@master
+    with:
+      tag: ${{ inputs.tag }}
