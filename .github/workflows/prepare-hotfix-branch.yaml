@@ -11,6 +11,8 @@ on:
 jobs:
   call-dashboard-workflow:
     uses: petersutter/dashboard/.github/workflows/prepare-hotfix-branch.yaml@master
+    permissions:
+      contents: write
     with:
       tag: ${{ inputs.tag }}
     secrets:
