@@ -132,3 +132,5 @@ The following describes the flow to authenticate against a `Shoot` cluster as cl
 6. According to the garden cluster identity under `clusters[].cluster.extensions[].extension.gardenClusterIdentity`, the `gardenlogin` plugin searches a matching garden cluster in its configuration file (`gardenClusters[].clusterIdentity`) to get the `kubeconfig` of the garden cluster
 7. The `gardenlogin` plugin calls `shoots/adminkubeconfig` resource with an `AdminKubeConfigRequest` for the `Shoot` cluster referenced under `clusters[].cluster.extensions[].extension.shootRef`
 8. The `gardenlogin` plugin takes the x509 client certificate from the returned `AdminKubeConfigRequest` under `status.kubeconfig` and prints it as `ExecCredential` to `stdout`
+
+TEST
