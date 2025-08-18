@@ -1,0 +1,85 @@
+name: Cherry Pick Action
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: none  # we rely on the GitHub App token instead
+
+jobs:
+  parse-branches:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/cherry-pick ') &&
+      (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER') &&
+      github.event.comment.user.type == 'User'
+    outputs:
+      branches: ${{ steps.parse.outputs.branches }}
+      has-branches: ${{ steps.parse.outputs.has-branches }}
+    steps:
+      - uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
+        id: token
+        with:
+          app-id: ${{ vars.GARDENER_GITHUB_ACTIONS_APP_ID }}
+          private-key: ${{ secrets.GARDENER_GITHUB_ACTIONS_PRIVATE_KEY }}
+          permission-pull-requests: write
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ steps.token.outputs.token }}
+      - name: Parse branches
+        id: parse
+        uses: petersutter/dashboard/.github/actions/parse-cherry-pick-branches@master
+        with:
+          github_token: ${{ steps.token.outputs.token }}
+
+  cherry-pick:
+    runs-on: ubuntu-latest
+    needs: parse-branches
+    if: needs.parse-branches.outputs.has-branches == 'true'
+    strategy:
+      matrix:
+        target-branch: ${{ fromJson(needs.parse-branches.outputs.branches) }}
+      fail-fast: false
+    steps:
+      - uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
+        id: token
+        with:
+          app-id: ${{ vars.GARDENER_GITHUB_ACTIONS_APP_ID }}
+          private-key: ${{ secrets.GARDENER_GITHUB_ACTIONS_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ steps.token.outputs.token }}
+      - name: Perform Cherry Pick
+        uses: petersutter/dashboard/.github/actions/cherry-pick@master
+        with:
+          pr-number: ${{ github.event.issue.number }}
+          target-branch: ${{ matrix.target-branch }}
+          github-token: ${{ steps.token.outputs.token }}
+
+  summary:
+    runs-on: ubuntu-latest
+    needs: [parse-branches, cherry-pick]
+    if: always() && needs.parse-branches.outputs.has-branches == 'true'
+    steps:
+      - uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b # v2.1.1
+        id: token
+        with:
+          app-id: ${{ vars.GARDENER_GITHUB_ACTIONS_APP_ID }}
+          private-key: ${{ secrets.GARDENER_GITHUB_ACTIONS_PRIVATE_KEY }}
+          permission-pull-requests: write
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ steps.token.outputs.token }}
+      - name: Post completion summary
+        uses: petersutter/dashboard/.github/actions/cherry-pick-summary@master
+        with:
+          github_token: ${{ steps.token.outputs.token }}
+          pr_number: ${{ github.event.issue.number }}
+          cherry_pick_result: ${{ needs.cherry-pick.result }}
