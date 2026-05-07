@@ -7,20 +7,26 @@ SPDX-License-Identifier: Apache-2.0
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
 
 	authenticationv1alpha1 "github.com/gardener/gardener/pkg/apis/authentication/v1alpha1"
 	gardenscheme "github.com/gardener/gardener/pkg/client/core/clientset/versioned/scheme"
 	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -33,7 +39,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
-	"k8s.io/utils/strings/slices"
 
 	"github.com/gardener/gardenlogin/internal/certificatecache"
 	"github.com/gardener/gardenlogin/internal/certificatecache/store"
@@ -165,11 +170,13 @@ func NewCmdGetClientCertificate(f util.Factory, ioStreams util.IOStreams) *cobra
 			if err := o.Complete(f, cmd, args); err != nil {
 				return fmt.Errorf("failed to complete command options: %w", err)
 			}
+
 			if err := o.Validate(); err != nil {
 				return err
 			}
 
 			ctx := context.Background()
+
 			return o.RunGetClientCertificate(ctx)
 		},
 	}
@@ -265,8 +272,8 @@ func (o *GetClientCertificateOptions) Validate() error {
 			return errors.New("cluster must be specified")
 		}
 
-		if len(o.ShootCluster.Server) == 0 {
-			return errors.New("server must be specified")
+		if err := validateServer(o.ShootCluster.Server); err != nil {
+			return err
 		}
 	}
 
@@ -274,16 +281,41 @@ func (o *GetClientCertificateOptions) Validate() error {
 		return errors.New("name must be specified. Hint: update kubectl in case you are using a version older than v1.20.0")
 	}
 
+	if errs := apivalidation.NameIsDNSLabel(o.ShootRef.Name, false); len(errs) > 0 {
+		return fmt.Errorf("invalid shoot name %q: %s", o.ShootRef.Name, strings.Join(errs, ", "))
+	}
+
 	if len(o.ShootRef.Namespace) == 0 {
 		return errors.New("namespace must be specified")
 	}
 
-	if len(o.GardenClusterIdentity) == 0 {
-		return errors.New("garden cluster identity must be specified")
+	if errs := apivalidation.ValidateNamespaceName(o.ShootRef.Namespace, false); len(errs) > 0 {
+		return fmt.Errorf("invalid namespace %q: %s", o.ShootRef.Namespace, strings.Join(errs, ", "))
+	}
+
+	if err := ValidateGardenClusterIdentity(o.GardenClusterIdentity); err != nil {
+		return err
 	}
 
 	if !slices.Contains(o.AllowedAccessLevels(), o.AccessLevel) {
 		return fmt.Errorf("invalid access level: %s. Access level must be one of %v", o.AccessLevel, o.AllowedAccessLevels())
+	}
+
+	return nil
+}
+
+func validateServer(server string) error {
+	if len(server) == 0 {
+		return errors.New("server must be specified")
+	}
+
+	u, err := url.Parse(server)
+	if err != nil {
+		return fmt.Errorf("server must be a valid URL: %w", err)
+	}
+
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("server URL scheme must be http or https, got %q", u.Scheme)
 	}
 
 	return nil
@@ -334,6 +366,14 @@ func (o *GetClientCertificateOptions) getExecCredential(ctx context.Context, cer
 	logger := klog.FromContext(ctx)
 
 	if cachedCertificateSet != nil {
+		if err := ValidateClientCertificate(cachedCertificateSet.ClientCertificateData); err != nil {
+			return nil, fmt.Errorf("invalid cached certificate: %w", err)
+		}
+
+		if err := ValidateClientKey(cachedCertificateSet.ClientKeyData); err != nil {
+			return nil, fmt.Errorf("invalid cached client key: %w", err)
+		}
+
 		certPem, _ := pem.Decode(cachedCertificateSet.ClientCertificateData)
 		if certPem == nil {
 			return nil, errors.New("no PEM data found")
@@ -375,6 +415,14 @@ func (o *GetClientCertificateOptions) getExecCredential(ctx context.Context, cer
 	userConfig, err := authInfoFromKubeconfigForCluster(kubeconfigRequest.kubeconfig, o.ShootCluster)
 	if err != nil {
 		return nil, fmt.Errorf("could not find matching auth info from shoot kubeconfig for given cluster: %w", err)
+	}
+
+	if err := ValidateClientCertificate(userConfig.ClientCertificateData); err != nil {
+		return nil, fmt.Errorf("invalid client certificate returned from garden cluster: %w", err)
+	}
+
+	if err := ValidateClientKey(userConfig.ClientKeyData); err != nil {
+		return nil, fmt.Errorf("invalid client key returned from garden cluster: %w", err)
 	}
 
 	certificateSet := certificatecache.CertificateSet{
@@ -588,4 +636,99 @@ func authInfoFromConfigForUserName(config api.Config, userName string) (*api.Aut
 	}
 
 	return nil, fmt.Errorf("no matching user config found for user name %s", userName)
+}
+
+var (
+	// allowedCharsPattern checks if the string contains only alphanumeric characters, underscore or hyphen.
+	allowedCharsPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	// startsAndEndsWithAlphanumericPattern checks if the string starts and ends with an alphanumeric character.
+	startsAndEndsWithAlphanumericPattern = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$`)
+)
+
+// ValidateGardenClusterIdentity validates that a garden cluster identity follows the naming rules:
+// 1. Must contain only alphanumeric characters, underscore or hyphen
+// 2. Must start and end with an alphanumeric character.
+func ValidateGardenClusterIdentity(identity string) error {
+	if len(identity) == 0 {
+		return errors.New("garden cluster identity must be specified")
+	}
+
+	if !allowedCharsPattern.MatchString(identity) {
+		return errors.New("garden cluster identity must contain only alphanumeric characters, underscore or hyphen")
+	}
+
+	if !startsAndEndsWithAlphanumericPattern.MatchString(identity) {
+		return errors.New("garden cluster identity must start and end with an alphanumeric character")
+	}
+
+	return nil
+}
+
+// ValidateClientCertificate ensures the client certificate:
+// - is exactly one PEM block (no extra data before/after)
+// - has no PEM headers
+// - parses as a valid X.509 certificate.
+func ValidateClientCertificate(certData []byte) error {
+	if !bytes.HasPrefix(certData, []byte("-----BEGIN ")) {
+		return errors.New("client certificate must start with a PEM BEGIN line")
+	}
+
+	block, rest := pem.Decode(certData)
+	if block == nil {
+		return errors.New("client certificate must be a valid PEM-encoded certificate")
+	}
+
+	if len(bytes.TrimSpace(rest)) > 0 {
+		return errors.New("client certificate must contain exactly one PEM block (unexpected data after END line)")
+	}
+
+	if len(block.Headers) != 0 {
+		return errors.New("client certificate must not include PEM headers")
+	}
+
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return fmt.Errorf("client certificate cannot be parsed as X.509 certificate: %w", err)
+	}
+
+	return nil
+}
+
+// ValidateClientKey ensures the client key:
+// - is exactly one PEM block (no extra data before/after)
+// - has no PEM headers
+// - parses as a valid private key in PKCS#1 or PKCS#8 format.
+func ValidateClientKey(keyData []byte) error {
+	if !bytes.HasPrefix(keyData, []byte("-----BEGIN ")) {
+		return errors.New("client key must start with a PEM BEGIN line")
+	}
+
+	block, rest := pem.Decode(keyData)
+	if block == nil {
+		return errors.New("client key must be a valid PEM-encoded key")
+	}
+
+	if len(bytes.TrimSpace(rest)) > 0 {
+		return errors.New("client key must contain exactly one PEM block (unexpected data after END line)")
+	}
+
+	if len(block.Headers) != 0 {
+		return errors.New("client key must not include PEM headers")
+	}
+
+	// Gardener uses "RSA PRIVATE KEY" for both PKCS#1 and PKCS#8
+	if block.Type != "RSA PRIVATE KEY" {
+		return fmt.Errorf("unexpected PEM block type %q, expected RSA PRIVATE KEY", block.Type)
+	}
+
+	// Try PKCS#1 first (current Gardener default)
+	if _, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return nil
+	}
+
+	// Try PKCS#8 (Gardener supports this, just doesn't use it by default yet)
+	if _, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		return nil
+	}
+
+	return errors.New("client key is not a valid private key (tried PKCS#1 and PKCS#8 formats)")
 }
