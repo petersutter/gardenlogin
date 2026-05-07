@@ -1,8 +1,6 @@
 name: publish-to-package-repositories
 
-permissions:
-  contents: write
-  actions:  read
+permissions: {}
 
 on:
   workflow_call:
@@ -12,15 +10,7 @@ on:
         required: true
         description: |
           the OCM-Component-Descriptor from which to publish built artefacts
-    secrets:
-      GARDENER_GITHUB_WORKFLOW_PKG_MNGR_APP_ID:
-        required: false
-        description: App ID for the gardener-github-pkg-mngr GitHub App
-      GARDENER_GITHUB_WORKFLOW_PKG_MNGR_APP_PRIVATE_KEY:
-        required: false
-        description: Private key for the gardener-github-pkg-mngr GitHub App
 
-  # Manual / ad‑hoc trigger
   workflow_dispatch:
     inputs:
       version:
@@ -45,28 +35,22 @@ on:
         default: false
 
 jobs:
-  update_gardenlogin_in_homebrew_tap_and_chocolatey_packages:
+  resolve-digests:
     runs-on: ubuntu-latest
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}
-      cancel-in-progress: true
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.read-digests.outputs.version || steps.export-version.outputs.version }}
+      darwin_sha_amd64: ${{ steps.read-digests.outputs.DARWIN_SHA_AMD64 || steps.dummy-hashes.outputs.DARWIN_SHA_AMD64 }}
+      darwin_sha_arm64: ${{ steps.read-digests.outputs.DARWIN_SHA_ARM64 || steps.dummy-hashes.outputs.DARWIN_SHA_ARM64 }}
+      linux_sha_amd64: ${{ steps.read-digests.outputs.LINUX_SHA_AMD64 || steps.dummy-hashes.outputs.LINUX_SHA_AMD64 }}
+      linux_sha_arm64: ${{ steps.read-digests.outputs.LINUX_SHA_ARM64 || steps.dummy-hashes.outputs.LINUX_SHA_ARM64 }}
+      windows_sha: ${{ steps.read-digests.outputs.WINDOWS_SHA || steps.dummy-hashes.outputs.WINDOWS_SHA }}
 
     steps:
-      # ───── GitHub‑App token (needed for repo‑dispatch) ──────────────────────
-      - name: Get token for gardener-github-pkg-mngr app
-        if: ${{ inputs.dry_run == false }}
-        id: gardener-github-workflows
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3   # v3.1.1
-        with:
-          app-id:      ${{ secrets.GARDENER_GITHUB_WORKFLOW_PKG_MNGR_APP_ID }}
-          private-key: ${{ secrets.GARDENER_GITHUB_WORKFLOW_PKG_MNGR_APP_PRIVATE_KEY }}
-          owner:       ${{ github.repository_owner }}
-          repositories: |
-            homebrew-tap
-            chocolatey-packages
-
       - uses: gardener/cc-utils/.github/actions/trusted-checkout@v1 # zizmor: ignore[unpinned-uses] -- same-org action; intentionally allowed for now, planned to pin to a version in the future
-      - name: export-version-from-input
+
+      - name: Export version from input
         id: export-version
         if: ${{ inputs.version != '' && inputs.component-descriptor == '' }}
         env:
@@ -74,7 +58,8 @@ jobs:
         run: |
           set -eu
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-      - name: Read-Digests
+
+      - name: Read digests from component-descriptor
         id: read-digests
         if: ${{ inputs.component-descriptor != '' }}
         env:
@@ -93,12 +78,10 @@ jobs:
           echo "LINUX_SHA_ARM64=${LINUX_SHA_ARM64}" >> "${GITHUB_OUTPUT}"
           echo "WINDOWS_SHA=${WINDOWS_SHA}" >> "${GITHUB_OUTPUT}"
 
-          version="$(cat /tmp/component-descriptor.yaml | \
-            yq '.component.version'
-          )"
+          version="$(yq '.component.version' /tmp/component-descriptor.yaml)"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Use dummy hashes (skip‑build)
+      - name: Use dummy hashes (manual run without component-descriptor)
         id: dummy-hashes
         if: ${{ inputs.component-descriptor == '' }}
         run: |
@@ -111,59 +94,26 @@ jobs:
             "LINUX_SHA_ARM64=$dummy"  \
             "WINDOWS_SHA=$dummy" >> "$GITHUB_OUTPUT"
 
-      # ───── Homebrew tap dispatch ────────────────────────────────────────────
-      - name: Send update to ${{ github.repository_owner}}/homebrew-tap
-        if: ${{ inputs.dry_run == false }}
-        env:
-          GITHUB_APP_TOKEN: ${{ steps.gardener-github-workflows.outputs.token }}
-          version: ${{ steps.read-digests.outputs.version || steps.export-version.outputs.version }}
-          DARWIN_SHA_AMD64: ${{ steps.read-digests.outputs.DARWIN_SHA_AMD64 || steps.dummy-hashes.outputs.DARWIN_SHA_AMD64 }}
-          DARWIN_SHA_ARM64: ${{ steps.read-digests.outputs.DARWIN_SHA_ARM64 || steps.dummy-hashes.outputs.DARWIN_SHA_ARM64 }}
-          LINUX_SHA_AMD64: ${{ steps.read-digests.outputs.LINUX_SHA_AMD64 || steps.dummy-hashes.outputs.LINUX_SHA_AMD64 }}
-          LINUX_SHA_ARM64: ${{ steps.read-digests.outputs.LINUX_SHA_ARM64 || steps.dummy-hashes.outputs.LINUX_SHA_ARM64 }}
-        run: |
-          set -euo pipefail
-          data=$(jq -n \
-            --arg component          "gardenlogin" \
-            --arg tag                "$version" \
-            --arg darwin_sha_amd64   "$DARWIN_SHA_AMD64" \
-            --arg darwin_sha_arm64   "$DARWIN_SHA_ARM64" \
-            --arg linux_sha_amd64    "$LINUX_SHA_AMD64" \
-            --arg linux_sha_arm64    "$LINUX_SHA_ARM64" \
-            '{event_type:"update",
-              client_payload:{
-                component:$component,
-                tag:$tag,
-                darwin_sha_amd64:$darwin_sha_amd64,
-                darwin_sha_arm64:$darwin_sha_arm64,
-                linux_sha_amd64:$linux_sha_amd64,
-                linux_sha_arm64:$linux_sha_arm64}}')
-          curl -X POST \
-            -H 'Accept: application/vnd.github.everest-preview+json' \
-            -H "Authorization: Bearer ${GITHUB_APP_TOKEN}" \
-            -d "$data" \
-            "https://api.github.com/repos/${{ github.repository_owner }}/homebrew-tap/dispatches"
+  update-homebrew:
+    needs: resolve-digests
+    if: ${{ inputs.dry_run != true }}
+    uses: gardener/homebrew-tap/.github/workflows/update-package.yaml@master # FORK-TEST: change to petersutter/homebrew-tap
+    with:
+      component: gardenlogin
+      tag: ${{ needs.resolve-digests.outputs.version }}
+      darwin_sha_amd64: ${{ needs.resolve-digests.outputs.darwin_sha_amd64 }}
+      darwin_sha_arm64: ${{ needs.resolve-digests.outputs.darwin_sha_arm64 }}
+      linux_sha_amd64: ${{ needs.resolve-digests.outputs.linux_sha_amd64 }}
+      linux_sha_arm64: ${{ needs.resolve-digests.outputs.linux_sha_arm64 }}
 
-      # ───── Chocolatey dispatch ──────────────────────────────────────────────
-      - name: Send update to ${{ github.repository_owner }}/chocolatey-packages
-        if: ${{ inputs.dry_run == false }}
-        env:
-          GITHUB_APP_TOKEN: ${{ steps.gardener-github-workflows.outputs.token }}
-          version: ${{ steps.read-digests.outputs.version || steps.export-version.outputs.version }}
-          WINDOWS_SHA: ${{ steps.read-digests.outputs.WINDOWS_SHA || steps.dummy-hashes.outputs.WINDOWS_SHA }}
-        run: |
-          set -euo pipefail
-          data=$(jq -n \
-            --arg component   "gardenlogin" \
-            --arg tag         "$version" \
-            --arg windows_sha "$WINDOWS_SHA" \
-            '{event_type:"update",
-              client_payload:{
-                component:$component,
-                tag:$tag,
-                windows_sha:$windows_sha}}')
-          curl -X POST \
-            -H 'Accept: application/vnd.github.everest-preview+json' \
-            -H "Authorization: Bearer ${GITHUB_APP_TOKEN}" \
-            -d "$data" \
-            "https://api.github.com/repos/${{ github.repository_owner}}/chocolatey-packages/dispatches"
+  update-chocolatey:
+    needs: resolve-digests
+    if: ${{ inputs.dry_run != true }}
+    uses: gardener/chocolatey-packages/.github/workflows/update-package.yaml@master # FORK-TEST: change to petersutter/chocolatey-packages
+    secrets:
+      CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+    with:
+      component: gardenlogin
+      tag: ${{ needs.resolve-digests.outputs.version }}
+      windows_sha: ${{ needs.resolve-digests.outputs.windows_sha }}
+      push_to_chocolatey: true
