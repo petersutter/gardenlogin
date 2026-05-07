@@ -86,7 +86,7 @@ jobs:
         if: ${{ inputs.component-descriptor == '' }}
         run: |
           set -euo pipefail
-          dummy=dummySHA256sum
+          dummy=0000000000000000000000000000000000000000000000000000000000000000
           printf '%s\n' \
             "DARWIN_SHA_AMD64=$dummy" \
             "DARWIN_SHA_ARM64=$dummy" \
@@ -97,7 +97,7 @@ jobs:
   update-homebrew:
     needs: resolve-digests
     if: ${{ inputs.dry_run != true }}
-    uses: gardener/homebrew-tap/.github/workflows/update-package.yaml@master # FORK-TEST: change to petersutter/homebrew-tap
+    uses: petersutter/homebrew-tap/.github/workflows/update-package.yaml@master # FORK-TEST: change to petersutter/homebrew-tap
     with:
       component: gardenlogin
       tag: ${{ needs.resolve-digests.outputs.version }}
@@ -109,7 +109,7 @@ jobs:
   update-chocolatey:
     needs: resolve-digests
     if: ${{ inputs.dry_run != true }}
-    uses: gardener/chocolatey-packages/.github/workflows/update-package.yaml@master # FORK-TEST: change to petersutter/chocolatey-packages
+    uses: petersutter/chocolatey-packages/.github/workflows/update-package.yaml@master # FORK-TEST: change to petersutter/chocolatey-packages
     secrets:
       CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
     with:
