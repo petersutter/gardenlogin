@@ -97,6 +97,9 @@ jobs:
   update-homebrew:
     needs: resolve-digests
     if: ${{ inputs.dry_run != true }}
+    permissions:
+      contents: write
+      id-token: write
     uses: petersutter/homebrew-tap/.github/workflows/update-package.yaml@master # FORK-TEST: change to petersutter/homebrew-tap
     with:
       component: gardenlogin
@@ -109,6 +112,9 @@ jobs:
   update-chocolatey:
     needs: resolve-digests
     if: ${{ inputs.dry_run != true }}
+    permissions:
+      contents: write
+      id-token: write
     uses: petersutter/chocolatey-packages/.github/workflows/update-package.yaml@master # FORK-TEST: change to petersutter/chocolatey-packages
     secrets:
       CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
